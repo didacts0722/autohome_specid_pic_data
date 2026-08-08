@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 爬虫输出产物（图片/进度/日志）
+out_put/
+download_progress.json
+download_error_tasks.json
+*.log
+
+# 大体积中间/数据文件
+# 注意：已入库的文件不受 .gitignore 影响，需用 `git rm --cached <文件>` 取消跟踪
+spec_id.txt
+spec_id_pic_color_cnt.csv
+spec_id_pic_color_cnt_test.csv
+spec_id_sample_test.txt
+error_tasks.json
+page_source.html
