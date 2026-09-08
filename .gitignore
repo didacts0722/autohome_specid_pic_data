@@ -11,9 +11,10 @@ download_error_tasks.json
 
 # 大体积中间/数据文件
 # 注意：已入库的文件不受 .gitignore 影响，需用 `git rm --cached <文件>` 取消跟踪
+# 日期分片输出（260715/260908…）动辄几十~几百 MB，一律不入库；
+# 历史已跟踪的 spec_id.txt / *_test.csv 属上游既有约定，保留跟踪
 spec_id.txt
-spec_id_pic_color_cnt.csv
-spec_id_pic_color_cnt_test.csv
+spec_id_pic_color_cnt_*.csv
 spec_id_sample_test.txt
 error_tasks.json
 page_source.html

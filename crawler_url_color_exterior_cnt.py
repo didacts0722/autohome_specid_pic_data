@@ -12,6 +12,8 @@
 - 颜色列表抓取失败会写入错误文件，下次自动优先重试
 - 外观数量"解析失败"与"真为 0"区分：解析失败进错误文件重试，不污染 CSV
 - 颜色列表失败带 stage 标记；--retry/错误文件自动处理两种失败类型
+- 确定性输出：输出行以 (spec_id, color_id) 唯一——页面颜色列表解析按 id 去重、
+  任务列表防御性去重、输出文件排他锁防止多实例并发写同一文件造成重复行
 
 用法示例:
   python crawler_url_color_exterior_cnt.py
@@ -19,6 +21,7 @@
   python crawler_url_color_exterior_cnt.py --input spec_id.txt --output out.csv
 """
 import argparse
+import atexit
 import csv
 import json
 import logging
@@ -50,6 +53,30 @@ CSV_HEADER = ['url', 'series_id', 'spec_id', 'car_name', 'color_id', 'value',
 
 write_lock = Lock()
 log = logging.getLogger('crawler')
+
+
+# ---------- 输出文件排他锁（防并发重复） ----------
+def acquire_output_lock(output_file: str) -> str:
+    """为输出 CSV 建立排他锁文件，防止多个实例并发写同一文件产生重复行。
+
+    锁文件 = <output_file>.lock（内容为当前 PID）。进程正常/异常退出时由
+    atexit 清理；被强制 kill（-9/断电）残留时，下次运行会报错并提示人工
+    确认后删除锁文件。
+    """
+    lock_path = output_file + '.lock'
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        log.error(
+            '发现锁文件 %s：可能已有另一个实例在写同一输出文件。'
+            '若确认没有其他实例在运行（如上次异常退出残留），请删除该文件后重试。',
+            lock_path)
+        raise SystemExit(2)
+    try:
+        os.write(fd, str(os.getpid()).encode('ascii'))
+    finally:
+        os.close(fd)
+    return lock_path
 
 
 # ---------- 断点续传 ----------
@@ -183,7 +210,7 @@ def extract_color_metadata(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             if isinstance(value, list) and value:
                 sample = value[0]
                 if isinstance(sample, dict) and 'id' in sample and 'name' in sample:
-                    return _parse_colors(value)
+                    return _parse_colors(_dedupe_by_id(value))
             if isinstance(value, dict):
                 color_list = []
                 if 'color' in value and isinstance(value['color'], list):
@@ -191,15 +218,21 @@ def extract_color_metadata(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if 'othercolor' in value and isinstance(value['othercolor'], list):
                     color_list.extend(value['othercolor'])
                 if color_list:
-                    seen = set()
-                    unique_colors = []
-                    for item in color_list:
-                        cid = item.get('id')
-                        if cid and cid not in seen:
-                            seen.add(cid)
-                            unique_colors.append(item)
-                    return _parse_colors(unique_colors)
+                    return _parse_colors(_dedupe_by_id(color_list))
     return []
+
+
+def _dedupe_by_id(raw_colors: List[Dict]) -> List[Dict]:
+    """按 id 去重并保持首次出现顺序（页面颜色列表理论上唯一，防御重复条目）。"""
+    seen = set()
+    result = []
+    for item in raw_colors:
+        cid = item.get('id')
+        if cid is None or cid in seen:
+            continue
+        seen.add(cid)
+        result.append(item)
+    return result
 
 
 def _parse_colors(raw_colors: List[Dict]) -> List[Dict]:
@@ -386,6 +419,11 @@ def main():
     args = parse_args()
     log = setup_logging()
 
+    # 排他锁：保证同一输出文件同时只有一个实例在写（防并发重复），
+    # 进程退出（含异常）时由 atexit 清理锁文件
+    lock_path = acquire_output_lock(args.output)
+    atexit.register(lambda: os.path.exists(lock_path) and os.remove(lock_path))
+
     completed = load_completed(args.output)
     log.info('断点续传：已读取 %d 条已完成记录', len(completed))
 
@@ -417,6 +455,21 @@ def main():
         log.info('共读取 %d 个车型', len(items))
         color_tasks, spec_failures = run_color_list_phase(
             items, limiter, args.workers, args.batch_size)
+
+    # 防御性去重：同一 (spec_id, color_id) 只保留首次出现的任务。
+    # 颜色列表页若返回重复色、或错误文件与全量任务叠加时，保证不重复抓取/写入
+    seen_pairs = set()
+    unique_tasks = []
+    for t in color_tasks:
+        key = (t['spec_id'], t['color_id'])
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        unique_tasks.append(t)
+    if len(unique_tasks) != len(color_tasks):
+        log.warning('任务内部去重：%d -> %d（同一 spec_id+color_id 重复）',
+                    len(color_tasks), len(unique_tasks))
+    color_tasks = unique_tasks
 
     # 过滤已完成任务（断点续传）
     pending = [t for t in color_tasks if (t['spec_id'], t['color_id']) not in completed]

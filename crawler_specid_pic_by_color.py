@@ -2,6 +2,10 @@
 """
 汽车之家：按 车型+颜色 下载外观图片。
 
+【已移交 / 不再维护】（2026-09-08 归档）：本流水线已整体移交他处，
+仅作历史存档保留，勿用于新任务。当前维护范围只有流水线 1
+（crawler_url_color_exterior_cnt.py，见 README）。
+
 输入: Excel 文件（需含 color_url, spec_id, name 三列）
 输出: out_put/<spec_id>_<颜色名>/NN_<原文件名>.jpg
 
