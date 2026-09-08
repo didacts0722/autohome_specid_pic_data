@@ -8,19 +8,19 @@ crawler_url_color_exterior_cnt.py 已从源头防重复（排他锁 + 任务去�
 解析去重），本脚本只用于清洗存量文件。
 
 用法:
-  python dedupe_pic_color_cnt.py <csv>            # 就地去重（写临时文件后原子替换）
+  python dedupe_pic_color_cnt.py <csv>            # 就地去重（先备份原文件，再原子替换）
   python dedupe_pic_color_cnt.py <csv> --dry-run  # 只看统计不动文件
 
-说明:
-- 读取/写出均 utf-8-sig（与爬虫输出一致，Excel 兼容）
-- 列结构原样保留（以文件表头为准），仅按 spec_id/color_id 去重
-- 去重键缺失时（列不存在）报错退出，不静默改文件
+数据安全:
+- 清洗前自动把原文件备份为 <csv>.bak_<时间戳>，确认无误后可自行删除备份
+- 去重只按 (spec_id, color_id) 合并"同键重复行"，不会删掉任何不同 color_id 的颜色
 """
 import argparse
 import csv
 import os
+import shutil
 import sys
-import tempfile
+import time
 
 
 def dedupe_csv(path: str, dry_run: bool = False):
@@ -51,7 +51,12 @@ def dedupe_csv(path: str, dry_run: bool = False):
     if dry_run or removed == 0:
         return 0
 
-    # 写临时文件（同目录，保证 os.replace 原子性）后替换原文件
+    # 1) 备份原文件（数据安全：清洗后可回溯）
+    backup_path = f'{path}.bak_{time.strftime("%Y%m%d_%H%M%S")}'
+    shutil.copy2(path, backup_path)
+    print(f'已备份原文件: {backup_path}')
+
+    # 2) 写临时文件（同目录，保证 os.replace 原子性）后替换原文件
     tmp_path = path + '.tmp_dedupe'
     with open(tmp_path, 'w', encoding='utf-8-sig', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

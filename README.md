@@ -65,7 +65,7 @@ python crawler_url_color_exterior_cnt.py --input spec_id.txt --output spec_id_pi
    （上次被强杀残留），删除对应 `.lock` 文件即可。
 2. **任务级去重**：颜色任务按 `(spec_id, color_id)` 只保留首次出现。
 3. **解析级去重**：页面颜色列表按 id 去重（list 与 color/othercolor 分支统一处理）。
-4. 历史脏数据清洗：`python dedupe_pic_color_cnt.py <csv> [--dry-run]`（保留首次出现行）。
+4. 历史脏数据清洗：`python dedupe_pic_color_cnt.py <csv> [--dry-run]`（保留首次出现行；**清洗前自动备份** `<csv>.bak_<时间戳>`，确认后自行删备份）。
 
 ## 数据产物（本地产物，不入库）
 
