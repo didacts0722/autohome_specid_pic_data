@@ -17,4 +17,5 @@ spec_id.txt
 spec_id_pic_color_cnt_*.csv
 spec_id_sample_test.txt
 error_tasks.json
+master_error_tasks.json
 page_source.html

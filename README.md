@@ -29,6 +29,7 @@
 **输入 `spec_id.txt`**
 - 每行一条记录：`系列ID_车型ID.Html$spec_id$车型名`（`$` 分隔 3 段）
 - 编码 UTF-8（无 BOM）；LF / CRLF 行尾均可；格式错误的行跳过并告警
+- 同一 spec 可能出现在多行（同一车挂在多个系列/车型页下）：脚本自动按 `spec_id` 去重、保留首行
 - 小样样例：`spec_id_sample_test.txt`（125 条）；全量文件为本地数据，不入库
 
 **输出 CSV**
@@ -67,10 +68,37 @@ python crawler_url_color_exterior_cnt.py --input spec_id.txt --output spec_id_pi
 3. **解析级去重**：页面颜色列表按 id 去重（list 与 color/othercolor 分支统一处理）。
 4. 历史脏数据清洗：`python dedupe_pic_color_cnt.py <csv> [--dry-run]`（保留首次出现行；**清洗前自动备份** `<csv>.bak_<时间戳>`，确认后自行删备份）。
 
+## 总表（master）：合并多批次 + 增量更新
+
+总表是全量结果的**单张主表**：行键 `(spec_id, color_id)` 全文件唯一，列 = 原 10 列 + 末尾 `updated_at`（抓取时间，ISO 文本序可排序），行按 `(spec, color)` 升序（确定性输出）。总表体积大，属本地产物不入库。
+
+**① 初始构建 / 重建总表**（合并任意批次 CSV，同键 `updated_at` 较新者胜，并列时命令行靠后者胜）
+
+```bash
+python merge_pic_color_cnt.py --out spec_id_pic_color_cnt_master.csv \
+    spec_id_pic_color_cnt_260715.csv spec_id_pic_color_cnt_260908.csv
+```
+
+- `updated_at` 自动按文件名日期推断（`*_260715.csv → 2026-07-15`）；也可 `--date YYYY-MM-DD` 统一指定；`--dry-run` 只统计
+
+**② 增量抓取并写入总表**（数据源 = 各期 `spec_id.txt`）
+
+```bash
+python crawler_url_color_exterior_cnt.py --master spec_id_pic_color_cnt_master.csv --input spec_id.txt
+```
+
+- **只补缺失**：只抓总表尚未覆盖的 spec；已存在的 `(spec_id, color_id)` 不刷新旧值
+- 新行 `updated_at` = 抓取时刻；**幂等**：中断后重跑同一命令即续传
+- 失败任务默认落 `master_error_tasks.json`，下次运行自动优先重试
+- `--limit N` 按"新增 spec"计，可小样试跑；`--rate/--workers` 同批次模式
+
+**存量状态（2026-09-08）**：master 714,890 行 / 54,348 spec（0715∪0908 去重）；当前 `spec_id.txt` 共 77,365 个 spec，其中未覆盖约 **23,029** 个 = 首轮增量抓取规模。
+
 ## 数据产物（本地产物，不入库）
 
 | 文件 | 说明 | 去重状态（2026-09-08） |
 |---|---|---|
+| `spec_id_pic_color_cnt_master.csv` | **总表**（0715∪0908 合并，11 列含 updated_at，不入库） | 714,890 行 / 0 重复 / 54,348 spec |
 | `spec_id_pic_color_cnt_260715.csv` | 07-15 批次大库 | 775,920 → **709,348** 行（移除重复 66,572） |
 | `spec_id_pic_color_cnt_260908.csv` | 09-08 批次 | 17,246 → **11,518** 行（移除重复 5,728） |
 | `spec_id_pic_color_cnt_test.csv` | 测试集（小，入库跟踪） | 2,702 行 |
@@ -79,9 +107,11 @@ python crawler_url_color_exterior_cnt.py --input spec_id.txt --output spec_id_pi
 ## 文件清单
 
 ```
-crawler_url_color_exterior_cnt.py   流水线 1：颜色列表 + 外观图片数量（维护中）
+crawler_url_color_exterior_cnt.py   流水线 1：颜色列表 + 外观图片数量（维护中；--master 总表增量模式）
 common.py                           共享底座：令牌桶限速 / Session 复用 / JSON 原子读写
-dedupe_pic_color_cnt.py             历史 CSV 按 (spec_id, color_id) 去重清洗
+master_csv.py                       总表规约与读写（11 列含 updated_at、排序、原子保存）
+merge_pic_color_cnt.py              合并批次 CSV 构建/重建总表（同键较新覆盖）
+dedupe_pic_color_cnt.py             历史 CSV 按 (spec_id, color_id) 去重清洗（自动备份）
 crawler_specid_pic_by_color.py      流水线 2（已移交，仅归档）
 spec_id_sample_test.txt             输入样例
 spec_id_pic_color_cnt_test.csv      输出小样例

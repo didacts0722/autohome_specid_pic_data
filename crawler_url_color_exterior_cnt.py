@@ -37,11 +37,13 @@ import requests
 from bs4 import BeautifulSoup
 
 from common import TokenBucket, get_session, load_json_list, save_json_list, setup_logging
+from master_csv import load_master, make_row, save_master
 
 # ---------- 默认配置（均可被命令行参数覆盖） ----------
 INPUT_FILE = 'spec_id.txt'
 OUTPUT_FILE = 'spec_id_pic_color_cnt.csv'
 ERROR_FILE = 'error_tasks.json'
+MASTER_ERROR_FILE = 'master_error_tasks.json'   # 总表增量模式的独立错误文件
 MAX_WORKERS = 20            # 线程池并发数
 RATE = 15.0                 # 全局请求速率（次/秒），令牌桶限速
 BATCH_SIZE = 1000           # 每批提交给线程池的任务数（控制内存）
@@ -280,7 +282,19 @@ def read_spec_id_txt(filepath: str) -> List[Dict[str, Any]]:
                 log.warning('跳过数字解析失败行: %s', line)
                 continue
             items.append({'series_id': series_id, 'spec_id': spec_id, 'car_name': car_name})
-    return items
+    # 输入去重：同一 spec 可能出现在多行（同一车挂在不同系列/车型页下），
+    # 只保留首次出现行，避免同一 spec 重复抓取
+    seen = set()
+    unique = []
+    for it in items:
+        if it['spec_id'] in seen:
+            continue
+        seen.add(it['spec_id'])
+        unique.append(it)
+    if len(unique) != len(items):
+        log.warning('输入文件按 spec_id 去重：%d 行 -> %d 个车型（跳过重复 %d 行）',
+                    len(items), len(unique), len(items) - len(unique))
+    return unique
 
 
 def build_series_url(item: Dict) -> str:
@@ -410,14 +424,118 @@ def parse_args():
     p.add_argument('--workers', type=int, default=MAX_WORKERS, help='线程池并发数（默认 %d）' % MAX_WORKERS)
     p.add_argument('--rate', type=float, default=RATE, help='全局请求速率 次/秒（默认 %.1f）' % RATE)
     p.add_argument('--batch-size', type=int, default=BATCH_SIZE, help='每批提交任务数（默认 %d）' % BATCH_SIZE)
-    p.add_argument('--limit', type=int, default=None, help='只处理前 N 个车型（测试用）')
+    p.add_argument('--limit', type=int, default=None, help='只处理前 N 个车型（测试用；总表模式下按新增 spec 计）')
+    p.add_argument('--master', default=None,
+                   help='总表 CSV 路径；指定后进入总表增量模式（只抓总表未覆盖的 spec，'
+                        '结果合并入总表并写 updated_at），默认 --error-file 切换为 master_error_tasks.json')
     return p.parse_args()
+
+
+def main_master(args):
+    """总表增量模式：以 spec_id.txt 为源，只抓总表尚未覆盖的 spec，结果合并入总表。
+
+    语义（2026-09-08 定版）:
+    - 只补缺失：总表已有行的 spec 直接跳过；已存在的 (spec_id, color_id) 不刷新旧值
+    - 每行写 updated_at（抓取时刻）；总表去重键 (spec_id, color_id)，写入幂等
+    - 失败任务默认落 master_error_tasks.json，下次运行优先重试
+    """
+    master_path = args.master
+    rows, specs, exists = load_master(master_path)
+    log.info('总表 %s：%s', master_path,
+             ('%d 行 / %d 个 spec' % (len(rows), len(specs))) if exists else '不存在，将新建')
+
+    err_file = MASTER_ERROR_FILE if args.error_file == ERROR_FILE else args.error_file
+
+    lock_path = acquire_output_lock(master_path)
+    atexit.register(lambda: os.path.exists(lock_path) and os.remove(lock_path))
+
+    limiter = TokenBucket(args.rate, int(args.rate))
+    error_tasks = load_json_list(err_file)
+    spec_retry = [t for t in error_tasks if not t.get('color_url')]
+    color_retry = [t for t in error_tasks if t.get('color_url')]
+    if error_tasks:
+        log.info('错误文件 %s 有 %d 条（spec 重试 %d / 颜色重试 %d），优先处理',
+                 err_file, len(error_tasks), len(spec_retry), len(color_retry))
+        save_json_list(err_file, [])
+
+    # 新增 spec（总表未覆盖；--limit 按新增计，便于小样测试）
+    items = read_spec_id_txt(args.input)
+    fresh_items = [it for it in items if it['spec_id'] not in specs]
+    if args.limit:
+        fresh_items = fresh_items[:args.limit]
+    log.info('输入 %d 个 spec，总表已覆盖 %d 个（跳过），新增待抓 %d 个',
+             len(items), len(items) - len(fresh_items), len(fresh_items))
+
+    # 阶段一：颜色列表（新增 spec + 上次失败的 spec，按 spec_id 去重）
+    phase1_items = []
+    seen_spec = set()
+    for it in list(fresh_items) + list(spec_retry):
+        sid = it['spec_id']
+        if sid in seen_spec:
+            continue
+        seen_spec.add(sid)
+        phase1_items.append(it)
+    spec_failures = []
+    tasks = []
+    if phase1_items:
+        tasks, spec_failures = run_color_list_phase(
+            phase1_items, limiter, args.workers, args.batch_size)
+        log.info('颜色列表阶段完成：%d 个颜色任务，%d 个 spec 失败',
+                 len(tasks), len(spec_failures))
+
+    # 阶段二：外观数量（只抓总表缺失的 (spec_id, color_id)，不刷新旧值）
+    pending = []
+    seen_keys = set()
+    for t in list(tasks) + list(color_retry):
+        key = (t['spec_id'], t['color_id'])
+        if key in rows or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        pending.append(t)
+    log.info('待抓外观数量 %d 个颜色任务', len(pending))
+
+    new_rows = {}
+    color_failures = []
+    now_ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        for batch_start in range(0, len(pending), args.batch_size):
+            batch = pending[batch_start:batch_start + args.batch_size]
+            futures = [ex.submit(process_color_task, t, limiter) for t in batch]
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result.get('success'):
+                    task = {k: v for k, v in result.items()
+                            if k not in ('success', 'error', 'appearance_count')}
+                    new_rows[(task['spec_id'], task['color_id'])] = make_row(
+                        task, result['appearance_count'], now_ts)
+                else:
+                    color_failures.append({k: v for k, v in result.items()
+                                           if k not in ('success', 'error', 'appearance_count')})
+    log.info('外观数量阶段完成：成功 %d，失败 %d', len(new_rows), len(color_failures))
+
+    if new_rows:
+        rows.update(new_rows)
+        save_master(master_path, rows)
+        log.info('总表合并完成：新增 %d 行，总行数 %d', len(new_rows), len(rows))
+    else:
+        log.info('本次无新增行')
+
+    all_failures = spec_failures + color_failures
+    save_json_list(err_file, all_failures)
+    if all_failures:
+        log.warning('%d 个任务失败，已写入 %s，下次运行自动重试',
+                    len(all_failures), err_file)
+    log.info('本次完成：新增 %d 行 / 失败 %d 条', len(new_rows), len(all_failures))
 
 
 def main():
     global log
     args = parse_args()
     log = setup_logging()
+
+    if args.master:
+        main_master(args)
+        return
 
     # 排他锁：保证同一输出文件同时只有一个实例在写（防并发重复），
     # 进程退出（含异常）时由 atexit 清理锁文件
