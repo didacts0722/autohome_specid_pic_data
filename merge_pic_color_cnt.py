@@ -97,6 +97,9 @@ def main():
 
     if args.dry_run:
         return 0
+    out_dir = os.path.dirname(args.out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     n = save_master(args.out, {k: v[0] for k, v in merged.items()})
     print(f'已写入: {args.out} ({n} 行)')
     return 0

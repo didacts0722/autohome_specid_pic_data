@@ -38,7 +38,7 @@ from common import (TokenBucket, get_session, load_json_list,
                     save_json_list, setup_logging)
 
 # ---------- 默认配置（均可被命令行参数覆盖） ----------
-EXCEL_FILE = 'spec_id_url_sample_20260715_1.xlsx'
+EXCEL_FILE = 'archived/spec_id_url_sample_20260715_1.xlsx'
 OUTPUT_ROOT = 'out_put'
 DOWNLOAD_COUNT = 8              # 每种颜色下载前几张外观图片
 REQUEST_TIMEOUT = 15

@@ -3,19 +3,18 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 爬虫输出产物（图片/进度/日志）
+# 流水线2（已归档）的图片输出与运行文件
 out_put/
 download_progress.json
 download_error_tasks.json
 *.log
 
-# 大体积中间/数据文件
-# 注意：已入库的文件不受 .gitignore 影响，需用 `git rm --cached <文件>` 取消跟踪
-# 日期分片输出（260715/260908…）动辄几十~几百 MB，一律不入库；
-# 历史已跟踪的 spec_id.txt / *_test.csv 属上游既有约定，保留跟踪
-spec_id.txt
+# 运行时锁与临时文件（os.replace 原子写的中转）
+*.lock
+*.tmp
+
+# 大体积数据产物（一律不入库；spec_id.txt / *_test.csv 因上游历史仍被跟踪，不受 ignore 影响）
+input/spec_id.txt
 spec_id_pic_color_cnt_*.csv
-spec_id_sample_test.txt
 error_tasks.json
 master_error_tasks.json
-page_source.html

@@ -40,10 +40,10 @@ from common import TokenBucket, get_session, load_json_list, save_json_list, set
 from master_csv import load_master, make_row, save_master
 
 # ---------- 默认配置（均可被命令行参数覆盖） ----------
-INPUT_FILE = 'spec_id.txt'
-OUTPUT_FILE = 'spec_id_pic_color_cnt.csv'
-ERROR_FILE = 'error_tasks.json'
-MASTER_ERROR_FILE = 'master_error_tasks.json'   # 总表增量模式的独立错误文件
+INPUT_FILE = 'input/spec_id.txt'
+OUTPUT_FILE = 'output/spec_id_pic_color_cnt.csv'
+ERROR_FILE = 'output/error_tasks.json'
+MASTER_ERROR_FILE = 'output/master_error_tasks.json'   # 总表增量模式的独立错误文件
 MAX_WORKERS = 20            # 线程池并发数
 RATE = 15.0                 # 全局请求速率（次/秒），令牌桶限速
 BATCH_SIZE = 1000           # 每批提交给线程池的任务数（控制内存）
@@ -55,6 +55,14 @@ CSV_HEADER = ['url', 'series_id', 'spec_id', 'car_name', 'color_id', 'value',
 
 write_lock = Lock()
 log = logging.getLogger('crawler')
+
+
+def ensure_parent_dirs(*paths: str):
+    """确保各路径的父目录存在（脚本默认产物输出到 input/output 子目录）。"""
+    for p in paths:
+        d = os.path.dirname(p)
+        if d:
+            os.makedirs(d, exist_ok=True)
 
 
 # ---------- 输出文件排他锁（防并发重复） ----------
@@ -446,6 +454,9 @@ def main_master(args):
 
     err_file = MASTER_ERROR_FILE if args.error_file == ERROR_FILE else args.error_file
 
+    # 确保总表/错误文件所在目录存在（默认 output/）
+    ensure_parent_dirs(master_path, err_file)
+
     lock_path = acquire_output_lock(master_path)
     atexit.register(lambda: os.path.exists(lock_path) and os.remove(lock_path))
 
@@ -536,6 +547,9 @@ def main():
     if args.master:
         main_master(args)
         return
+
+    # 确保输出/错误文件所在目录存在（默认 output/）
+    ensure_parent_dirs(args.output, args.error_file)
 
     # 排他锁：保证同一输出文件同时只有一个实例在写（防并发重复），
     # 进程退出（含异常）时由 atexit 清理锁文件
